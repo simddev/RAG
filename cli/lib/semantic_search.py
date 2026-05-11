@@ -185,16 +185,43 @@ def semantic_chunk(
     max_chunk_size: int = DEFAULT_SEMANTIC_CHUNK_SIZE,
     overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[str]:
+    # 1. Strip outer whitespace first
+    text = text.strip()
+
+    # 2. If empty after stripping → return []
+    if not text:
+        return []
+
+    # 3. Split into sentences
     sentences = re.split(r"(?<=[.!?])\s+", text)
+
+    # 4. Strip each sentence
+    sentences = [s.strip() for s in sentences if s and s.strip()]
+
+    # 5. If only one sentence AND no punctuation → treat whole text as one sentence
+    if len(sentences) == 1:
+        if not re.search(r"[.!?]$", sentences[0]):
+            sentences = [text]
+
+    # 6. Chunking
     chunks = []
     i = 0
-    n_sentences = len(sentences)
-    while i < n_sentences:
+    step = max_chunk_size - overlap
+
+    if step <= 0:
+        return [" ".join(sentences)]
+
+    while i < len(sentences):
         chunk_sentences = sentences[i : i + max_chunk_size]
-        if chunks and len(chunk_sentences) <= overlap:
-            break
-        chunks.append(" ".join(chunk_sentences))
-        i += max_chunk_size - overlap
+
+        chunk = " ".join(chunk_sentences).strip()
+
+        # 7. Only keep non-empty chunks
+        if chunk:
+            chunks.append(chunk)
+
+        i += step
+
     return chunks
 
 
@@ -270,9 +297,62 @@ class ChunkedSemanticSearch(SemanticSearch):
 
         return self.build_chunk_embeddings(documents)
 
+    def search_chunks(self, query: str, limit: int = 10):
+        if self.chunk_embeddings is None or self.chunk_metadata is None:
+            raise ValueError(
+                "Chunk embeddings not loaded. Call load_or_create_chunk_embeddings first."
+            )
+
+        query_embedding = self.generate_embedding(query)
+
+        chunk_scores = []
+
+        # score every chunk
+        for i, chunk_embedding in enumerate(self.chunk_embeddings):
+            score = cosine_similarity(query_embedding, chunk_embedding)
+
+            meta = self.chunk_metadata[i]
+
+            chunk_scores.append(
+                {
+                    "chunk_idx": meta["chunk_idx"],
+                    "movie_idx": meta["movie_idx"],
+                    "score": score,
+                }
+            )
+
+        # aggregate best score per movie
+        movie_scores = {}
+
+        for item in chunk_scores:
+            movie_idx = item["movie_idx"]
+            score = item["score"]
+
+            if movie_idx not in movie_scores or score > movie_scores[movie_idx]:
+                movie_scores[movie_idx] = score
+
+        # sort movies by score
+        sorted_movies = sorted(movie_scores.items(), key=lambda x: x[1], reverse=True)
+
+        results = []
+
+        for movie_idx, score in sorted_movies[:limit]:
+            doc = self.documents[movie_idx]
+
+            results.append(
+                {
+                    "id": doc["id"],
+                    "title": doc["title"],
+                    "document": doc["description"][:100],
+                    "score": round(score, 3),
+                    "metadata": {},
+                }
+            )
+
+        return results
+
 
 def embed_chunks_command() -> np.ndarray:
     movies = load_movies()
     searcher = ChunkedSemanticSearch()
     return searcher.load_or_create_chunk_embeddings(movies)
-
