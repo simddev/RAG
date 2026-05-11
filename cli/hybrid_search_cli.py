@@ -65,6 +65,13 @@ def main() -> None:
         help="Query enhancement method",
     )
 
+    rrf_parser.add_argument(
+        "--rerank-method",
+        type=str,
+        choices=["individual"],
+        help="Re-ranking method",
+    )
+
     rrf_parser.add_argument("query", type=str, help="Search query")
 
     rrf_parser.add_argument(
@@ -113,53 +120,56 @@ def main() -> None:
         case "rrf-search":
             query = args.query
 
+            # ----------------------------
+            # QUERY ENHANCEMENT (unchanged)
+            # ----------------------------
             if args.enhance:
                 client = get_gemini_client()
 
                 if args.enhance == "spell":
                     prompt = f"""Fix any spelling errors in the user-provided movie search query below.
-Correct only clear, high-confidence typos. Do not rewrite, add, remove, or reorder words.
-Preserve punctuation and capitalization unless a change is required for a typo fix.
-If there are no spelling errors, or if you're unsure, output the original query unchanged.
-Output only the final query text, nothing else.
-User query: "{query}"
-"""
+        Correct only clear, high-confidence typos. Do not rewrite, add, remove, or reorder words.
+        Preserve punctuation and capitalization unless a change is required for a typo fix.
+        If there are no spelling errors, or if you're unsure, output the original query unchanged.
+        Output only the final query text, nothing else.
+        User query: "{query}"
+        """
 
                 elif args.enhance == "rewrite":
                     prompt = f"""Rewrite the user-provided movie search query below to be more specific and searchable.
 
-Consider:
-- Common movie knowledge (famous actors, popular films)
-- Genre conventions (horror = scary, animation = cartoon)
-- Keep the rewritten query concise (under 10 words)
-- It should be a Google-style search query, specific enough to yield relevant results
-- Don't use boolean logic
+        Consider:
+        - Common movie knowledge (famous actors, popular films)
+        - Genre conventions (horror = scary, animation = cartoon)
+        - Keep the rewritten query concise (under 10 words)
+        - It should be a Google-style search query, specific enough to yield relevant results
+        - Don't use boolean logic
 
-Examples:
-- "that bear movie where leo gets attacked" -> "The Revenant Leonardo DiCaprio bear attack"
-- "movie about bear in london with marmalade" -> "Paddington London marmalade"
-- "scary movie with bear from few years ago" -> "bear horror movie 2015-2020"
+        Examples:
+        - "that bear movie where leo gets attacked" -> "The Revenant Leonardo DiCaprio bear attack"
+        - "movie about bear in london with marmalade" -> "Paddington London marmalade"
+        - "scary movie with bear from few years ago" -> "bear horror movie 2015-2020"
 
-If you cannot improve the query, output the original unchanged.
-Output only the rewritten query text, nothing else.
+        If you cannot improve the query, output the original unchanged.
+        Output only the rewritten query text, nothing else.
 
-User query: "{query}"
-"""
+        User query: "{query}"
+        """
 
                 elif args.enhance == "expand":
                     prompt = f"""Expand the user-provided movie search query below with related terms.
 
-Add synonyms and related concepts that might appear in movie descriptions.
-Keep expansions relevant and focused.
-Output only the additional terms; they will be appended to the original query.
+        Add synonyms and related concepts that might appear in movie descriptions.
+        Keep expansions relevant and focused.
+        Output only the additional terms; they will be appended to the original query.
 
-Examples:
-- "scary bear movie" -> "scary horror grizzly bear movie terrifying film"
-- "action movie with bear" -> "action thriller bear chase fight adventure"
-- "comedy with bear" -> "comedy funny bear humor lighthearted"
+        Examples:
+        - "scary bear movie" -> "scary horror grizzly bear movie terrifying film"
+        - "action movie with bear" -> "action thriller bear chase fight adventure"
+        - "comedy with bear" -> "comedy funny bear humor lighthearted"
 
-User query: "{query}"
-"""
+        User query: "{query}"
+        """
 
                 try:
                     response = client.models.generate_content(
@@ -168,24 +178,87 @@ User query: "{query}"
                     )
                     enhanced_query = response.text.strip()
                 except Exception:
-                    enhanced_query = query  # fallback if model fails
+                    enhanced_query = query
 
-                if enhanced_query:
-                    print(
-                        f"Enhanced query ({args.enhance}): '{query}' -> '{enhanced_query}'\n"
-                    )
+                print(
+                    f"Enhanced query ({args.enhance}): '{query}' -> '{enhanced_query}'\n"
+                )
 
-                    if args.enhance == "expand":
-                        query = f"{query} {enhanced_query}"
-                    else:
-                        query = enhanced_query
+                if args.enhance == "expand":
+                    query = f"{query} {enhanced_query}"
+                else:
+                    query = enhanced_query
 
-            result = rrf_search_command(query, args.k, args.limit)
+            # ----------------------------
+            # RRF SEARCH (normal or expanded retrieval size)
+            # ----------------------------
+            base_limit = args.limit
+            search_limit = (
+                base_limit * 5 if args.rerank_method == "individual" else base_limit
+            )
 
-            print(f"RRF Search Results for '{query}':\n")
+            result = rrf_search_command(query, args.k, search_limit)
+            results = result["results"]
 
-            for i, res in enumerate(result["results"], 1):
+            # ----------------------------
+            # LLM RE-RANKING (optional)
+            # ----------------------------
+            if args.rerank_method == "individual":
+                print(
+                    f"Re-ranking top {base_limit} results using individual method...\n"
+                )
+
+                client = get_gemini_client()
+
+                for res in results:
+                    doc = res
+
+                    prompt = f"""Rate how well this movie matches the search query.
+
+        Query: "{query}"
+        Movie: {doc.get("title", "")} - {doc.get("document", "")}
+
+        Consider:
+        - Direct relevance to query
+        - User intent (what they're looking for)
+        - Content appropriateness
+
+        Rate 0-10 (10 = perfect match).
+        Output ONLY the number in your response, no other text or explanation.
+
+        Score:"""
+
+                    try:
+                        response = client.models.generate_content(
+                            model="gemma-4-31b-it",
+                            contents=prompt,
+                        )
+                        score_text = response.text.strip()
+                        rerank_score = float(score_text)
+                    except Exception:
+                        rerank_score = 0.0
+
+                    res["rerank_score"] = rerank_score
+
+                    import time
+
+                    time.sleep(3)
+
+                results = sorted(
+                    results, key=lambda x: x.get("rerank_score", 0), reverse=True
+                )
+
+            # ----------------------------
+            # OUTPUT
+            # ----------------------------
+            print(f"Reciprocal Rank Fusion Results for '{query}' (k={args.k}):\n")
+
+            for i, res in enumerate(results[:base_limit], 1):
                 print(f"{i}. {res['title']}")
+
+                if args.rerank_method == "individual":
+                    print(f"   Re-rank Score: {res.get('rerank_score', 0):.3f}/10")
+
                 print(f"   RRF Score: {res['score']:.3f}")
 
                 metadata = res.get("metadata", {})
