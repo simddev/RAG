@@ -61,7 +61,7 @@ def main() -> None:
     rrf_parser.add_argument(
         "--enhance",
         type=str,
-        choices=["spell", "rewrite"],
+        choices=["spell", "rewrite", "expand"],
         help="Query enhancement method",
     )
 
@@ -84,10 +84,12 @@ def main() -> None:
     args = parser.parse_args()
 
     match args.command:
+
         case "normalize":
             normalized = normalize_scores(args.scores)
             for score in normalized:
                 print(f"* {score:.4f}")
+
         case "weighted-search":
             result = weighted_search_command(args.query, args.alpha, args.limit)
 
@@ -97,6 +99,7 @@ def main() -> None:
             print(
                 f"  Alpha {result['alpha']}: {int(result['alpha'] * 100)}% Keyword, {int((1 - result['alpha']) * 100)}% Semantic"
             )
+
             for i, res in enumerate(result["results"], 1):
                 print(f"{i}. {res['title']}")
                 print(f"   Hybrid Score: {res.get('score', 0):.3f}")
@@ -105,58 +108,77 @@ def main() -> None:
                     print(
                         f"   BM25: {metadata['bm25_score']:.3f}, Semantic: {metadata['semantic_score']:.3f}"
                     )
-                print(f"   {res['document'][:100]}...")
-                print()
+                print(f"   {res['document'][:100]}...\n")
 
         case "rrf-search":
             query = args.query
 
-            if args.enhance in ("spell", "rewrite"):
+            if args.enhance:
                 client = get_gemini_client()
 
                 if args.enhance == "spell":
                     prompt = f"""Fix any spelling errors in the user-provided movie search query below.
-        Correct only clear, high-confidence typos. Do not rewrite, add, remove, or reorder words.
-        Preserve punctuation and capitalization unless needed.
-        If unsure, output original unchanged.
-        Output only the final query text.
-
-        User query: "{query}"
-        """
+Correct only clear, high-confidence typos. Do not rewrite, add, remove, or reorder words.
+Preserve punctuation and capitalization unless a change is required for a typo fix.
+If there are no spelling errors, or if you're unsure, output the original query unchanged.
+Output only the final query text, nothing else.
+User query: "{query}"
+"""
 
                 elif args.enhance == "rewrite":
                     prompt = f"""Rewrite the user-provided movie search query below to be more specific and searchable.
 
-        Consider:
-        - Common movie knowledge (famous actors, popular films)
-        - Genre conventions
-        - Keep it under 10 words
-        - Google-style search query
-        - No boolean logic
+Consider:
+- Common movie knowledge (famous actors, popular films)
+- Genre conventions (horror = scary, animation = cartoon)
+- Keep the rewritten query concise (under 10 words)
+- It should be a Google-style search query, specific enough to yield relevant results
+- Don't use boolean logic
 
-        Examples:
-        - "that bear movie where leo gets attacked" -> "The Revenant Leonardo DiCaprio bear attack"
-        - "movie about bear in london with marmalade" -> "Paddington London marmalade"
-        - "scary movie with bear from few years ago" -> "bear horror movie 2015-2020"
+Examples:
+- "that bear movie where leo gets attacked" -> "The Revenant Leonardo DiCaprio bear attack"
+- "movie about bear in london with marmalade" -> "Paddington London marmalade"
+- "scary movie with bear from few years ago" -> "bear horror movie 2015-2020"
 
-        If you cannot improve it, output original unchanged.
-        Output only the rewritten query text.
+If you cannot improve the query, output the original unchanged.
+Output only the rewritten query text, nothing else.
 
-        User query: "{query}"
-        """
+User query: "{query}"
+"""
 
-                response = client.models.generate_content(
-                    model="gemma-4-31b-it",
-                    contents=prompt,
-                )
+                elif args.enhance == "expand":
+                    prompt = f"""Expand the user-provided movie search query below with related terms.
 
-                enhanced_query = response.text.strip()
+Add synonyms and related concepts that might appear in movie descriptions.
+Keep expansions relevant and focused.
+Output only the additional terms; they will be appended to the original query.
 
-                print(
-                    f"Enhanced query ({args.enhance}): '{query}' -> '{enhanced_query}'\n"
-                )
+Examples:
+- "scary bear movie" -> "scary horror grizzly bear movie terrifying film"
+- "action movie with bear" -> "action thriller bear chase fight adventure"
+- "comedy with bear" -> "comedy funny bear humor lighthearted"
 
-                query = enhanced_query
+User query: "{query}"
+"""
+
+                try:
+                    response = client.models.generate_content(
+                        model="gemma-4-31b-it",
+                        contents=prompt,
+                    )
+                    enhanced_query = response.text.strip()
+                except Exception:
+                    enhanced_query = query  # fallback if model fails
+
+                if enhanced_query:
+                    print(
+                        f"Enhanced query ({args.enhance}): '{query}' -> '{enhanced_query}'\n"
+                    )
+
+                    if args.enhance == "expand":
+                        query = f"{query} {enhanced_query}"
+                    else:
+                        query = enhanced_query
 
             result = rrf_search_command(query, args.k, args.limit)
 
