@@ -1,5 +1,8 @@
 import argparse
+import os
 
+from dotenv import load_dotenv
+from google import genai
 from lib.hybrid_search import (
     normalize_scores,
     weighted_search_command,
@@ -7,9 +10,27 @@ from lib.hybrid_search import (
 )
 
 
+def get_gemini_client():
+    load_dotenv()
+    api_key = os.environ.get("GEMINI_API_KEY")
+
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+
+    return genai.Client(api_key=api_key)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hybrid Search CLI")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    load_dotenv()
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    client = None
+
+    if api_key:
+        client = genai.Client(api_key=api_key)
 
     normalize_parser = subparsers.add_parser(
         "normalize", help="Normalize a list of scores"
@@ -35,6 +56,13 @@ def main() -> None:
     rrf_parser = subparsers.add_parser(
         "rrf-search",
         help="Perform Reciprocal Rank Fusion search",
+    )
+
+    rrf_parser.add_argument(
+        "--enhance",
+        type=str,
+        choices=["spell", "rewrite"],
+        help="Query enhancement method",
     )
 
     rrf_parser.add_argument("query", type=str, help="Search query")
@@ -81,20 +109,70 @@ def main() -> None:
                 print()
 
         case "rrf-search":
-            result = rrf_search_command(args.query, args.k, args.limit)
+            query = args.query
+
+            if args.enhance in ("spell", "rewrite"):
+                client = get_gemini_client()
+
+                if args.enhance == "spell":
+                    prompt = f"""Fix any spelling errors in the user-provided movie search query below.
+        Correct only clear, high-confidence typos. Do not rewrite, add, remove, or reorder words.
+        Preserve punctuation and capitalization unless needed.
+        If unsure, output original unchanged.
+        Output only the final query text.
+
+        User query: "{query}"
+        """
+
+                elif args.enhance == "rewrite":
+                    prompt = f"""Rewrite the user-provided movie search query below to be more specific and searchable.
+
+        Consider:
+        - Common movie knowledge (famous actors, popular films)
+        - Genre conventions
+        - Keep it under 10 words
+        - Google-style search query
+        - No boolean logic
+
+        Examples:
+        - "that bear movie where leo gets attacked" -> "The Revenant Leonardo DiCaprio bear attack"
+        - "movie about bear in london with marmalade" -> "Paddington London marmalade"
+        - "scary movie with bear from few years ago" -> "bear horror movie 2015-2020"
+
+        If you cannot improve it, output original unchanged.
+        Output only the rewritten query text.
+
+        User query: "{query}"
+        """
+
+                response = client.models.generate_content(
+                    model="gemma-4-31b-it",
+                    contents=prompt,
+                )
+
+                enhanced_query = response.text.strip()
+
+                print(
+                    f"Enhanced query ({args.enhance}): '{query}' -> '{enhanced_query}'\n"
+                )
+
+                query = enhanced_query
+
+            result = rrf_search_command(query, args.k, args.limit)
+
+            print(f"RRF Search Results for '{query}':\n")
 
             for i, res in enumerate(result["results"], 1):
                 print(f"{i}. {res['title']}")
                 print(f"   RRF Score: {res['score']:.3f}")
 
                 metadata = res.get("metadata", {})
-
                 print(
-                    f"   BM25 Rank: {metadata.get('bm25_rank')}, Semantic Rank: {metadata.get('semantic_rank')}"
+                    f"   BM25 Rank: {metadata.get('bm25_rank', '-')}, "
+                    f"Semantic Rank: {metadata.get('semantic_rank', '-')}"
                 )
 
-                print(f"   {res['document'][:100]}...")
-                print()
+                print(f"   {res['document'][:100]}...\n")
 
         case _:
             parser.print_help()
