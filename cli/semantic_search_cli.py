@@ -7,11 +7,11 @@ from lib.semantic_search import (
     embed_chunks_command,
     embed_query_text,
     embed_text,
+    search_chunked_command,
     semantic_chunk_text,
     semantic_search,
     verify_embeddings,
     verify_model,
-    ChunkedSemanticSearch,
 )
 
 
@@ -79,11 +79,12 @@ def main() -> None:
     )
 
     search_chunked_parser = subparsers.add_parser(
-        "search_chunked", help="Search movies using chunk embeddings"
+        "search_chunked", help="Search using chunked embeddings"
     )
-
-    search_chunked_parser.add_argument("query", type=str)
-    search_chunked_parser.add_argument("--limit", type=int, default=5)
+    search_chunked_parser.add_argument("query", type=str, help="Search query")
+    search_chunked_parser.add_argument(
+        "--limit", type=int, default=5, help="Number of results to return"
+    )
 
     args = parser.parse_args()
 
@@ -105,25 +106,17 @@ def main() -> None:
         case "embed_chunks":
             embeddings = embed_chunks_command()
             print(f"Generated {len(embeddings)} chunked embeddings")
-
         case "search_chunked":
-            from lib.search_utils import load_movies
-
-            movies = load_movies()
-
-            searcher = ChunkedSemanticSearch()
-
-            searcher.load_or_create_chunk_embeddings(movies)
-
-            results = searcher.search_chunks(args.query, args.limit)
-
-            for i, r in enumerate(results, 1):
-                print(f"\n{i}. {r['title']} (score: {r['score']:.4f})")
-                print(f"   {r['document']}...")
-
+            result = search_chunked_command(args.query, args.limit)
+            print(f"Query: {result['query']}")
+            print("Results:")
+            for i, res in enumerate(result["results"], 1):
+                print(f"\n{i}. {res['title']} (score: {res['score']:.4f})")
+                print(f"   {res['document']}...")
         case _:
             parser.print_help()
 
 
 if __name__ == "__main__":
     main()
+
