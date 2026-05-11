@@ -13,6 +13,8 @@ from .search_utils import (
     load_stopwords,
 )
 
+BM25_K1 = 1.5
+
 
 class InvertedIndex:
     def __init__(self) -> None:
@@ -74,11 +76,62 @@ class InvertedIndex:
         term_doc_count = len(self.index[token])
         return math.log((doc_count + 1) / (term_doc_count + 1))
 
+    def get_tfidf(self, doc_id: int, term: str) -> float:
+        tf = self.get_tf(doc_id, term)
+        idf = self.get_idf(term)
+        return tf * idf
+
+    def get_bm25_idf(self, term: str) -> float:
+        tokens = tokenize_text(term)
+
+        if len(tokens) != 1:
+            raise ValueError("term must be a single token")
+
+        token = tokens[0]
+
+        N = len(self.docmap)
+        df = len(self.index[token])
+
+        return math.log((N - df + 0.5) / (df + 0.5) + 1)
+
+    def get_bm25_tf(
+        self,
+        doc_id: int,
+        term: str,
+        k1: float = BM25_K1,
+    ) -> float:
+        tf = self.get_tf(doc_id, term)
+
+        return (tf * (k1 + 1)) / (tf + k1)
+
+
+def bm25_idf_command(term: str) -> float:
+    idx = InvertedIndex()
+    idx.load()
+    return idx.get_bm25_idf(term)
+
+
+def bm25_tf_command(
+    doc_id: int,
+    term: str,
+    k1: float = BM25_K1,
+) -> float:
+    idx = InvertedIndex()
+    idx.load()
+
+    return idx.get_bm25_tf(doc_id, term, k1)
+
 
 def build_command() -> None:
     idx = InvertedIndex()
     idx.build()
     idx.save()
+
+
+def tfidf_command(doc_id: int, term: str) -> float:
+    idx = InvertedIndex()
+    idx.load()
+    return idx.get_tfidf(doc_id, term)
 
 
 def search_command(query: str, limit: int = DEFAULT_SEARCH_LIMIT) -> list[dict]:
@@ -135,4 +188,3 @@ def idf_command(term: str) -> float:
     idx = InvertedIndex()
     idx.load()
     return idx.get_idf(term)
-
